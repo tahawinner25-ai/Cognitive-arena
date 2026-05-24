@@ -1,0 +1,74 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Primitives
+    function isSignedIn() { return request.auth != null && request.auth.token.email_verified == true; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // Validation Helpers
+    function isValidUser(data, uid) {
+      return data.keys().hasAll(['userId', 'role', 'createdAt']) && 
+             data.keys().size() == 3 &&
+             data.userId == uid &&
+             data.role is string && data.role.size() <= 20 &&
+             data.createdAt == request.time;
+    }
+    
+    function isValidLearningItem(data) {
+      return data.keys().hasAll(['userId', 'mode', 'language', 'originalText', 'generatedContent', 'createdAt']) &&
+             data.keys().size() == 6 &&
+             data.userId == request.auth.uid &&
+             data.mode is string && data.mode.size() <= 20 &&
+             data.language is string && data.language.size() <= 50 &&
+             data.originalText is string && data.originalText.size() <= 400000 &&
+             data.generatedContent is string && data.generatedContent.size() <= 400000 &&
+             data.createdAt == request.time;
+    }
+
+    // users Collection
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if false;
+
+      allow create: if isSignedIn() && 
+                    isValidId(userId) && 
+                    userId == request.auth.uid && 
+                    isValidUser(incoming(), userId);
+
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // learning_items Collection
+    match /learning_items/{itemId} {
+      allow get: if isSignedIn() && 
+                 isValidId(itemId) && 
+                 existing().userId == request.auth.uid;
+                 
+      allow list: if isSignedIn() && 
+                  resource.data.userId == request.auth.uid;
+
+      allow create: if isSignedIn() && 
+                    isValidId(itemId) && 
+                    isValidLearningItem(incoming()) &&
+                    exists(/databases/$(database)/documents/users/$(request.auth.uid));
+                    
+      allow update: if false;
+      allow delete: if false;
+    }
+    // arena_sessions Collection
+    match /arena_sessions/{sessionId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+  }
+}
