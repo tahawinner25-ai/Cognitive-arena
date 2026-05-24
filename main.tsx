@@ -72,6 +72,7 @@ export default function CognitiveGym({
   const [isArenaAuthenticated, setIsArenaAuthenticated] = useState(false);
   const [sessions, setSessions] = useState<any[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [customText, setCustomText] = useState("");
 
   useEffect(() => {
     if (arenaView === 'history' && user && isArenaAuthenticated) {
@@ -149,7 +150,8 @@ export default function CognitiveGym({
   }
 
   const currentCard = gymCards[selectedCardId] || gymCards[0];
-  const rawWords = currentCard.text.split(/\s+/);
+  const activeText = customText || currentCard.text;
+  const rawWords = activeText.split(/\s+/);
   
   // Words missed of length > 2
   const missedList = rawWords
@@ -175,7 +177,7 @@ export default function CognitiveGym({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           missedWords: missedList,
-          originalText: currentCard.text,
+          originalText: activeText,
           language: selectedLang
         })
       });
@@ -196,15 +198,40 @@ export default function CognitiveGym({
     if (!elasticQuery.trim()) return;
     setIsSearching(true);
     try {
-      const results = await queryElasticRAG(elasticQuery);
-      // Simulate real-time elastic search returning related learning records
-      const dummyResults = [
-        { title: "Phonemic Rule - Sibilants", excerpt: "Alveolar fricative consonants like {s} and {z} require a specific airflow...", score: 0.98 },
-        { title: "Patient History (Anonymized)", excerpt: "Noted improvement on auditory discrimination of occlusive phonemes [b/p].", score: 0.85 }
-      ];
-      setElasticResults(dummyResults);
+      const prompt = `You are an expert in phonetic-cognitive remediation. The user needs to practice the following concept or phoneme: "${elasticQuery}".\nGenerate 2 short, fun, and rhythmic sentences (tongue twisters) specifically designed to train the pronunciation of this phoneme.\n\nReturn ONLY a native JSON array containing objects with these exact keys: "title" (A name for the exercise, e.g., "Sibilants - Exercise 1"), "excerpt" (The sentence to pronounce), and "score" (a very precise random number between 0.85 and 0.99). Do not include any code blocks (no \`\`\`json). Just the JSON array.`;
+      
+      const response = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt })
+      });
+      
+      if (!response.ok) throw new Error('API Error');
+      const data = await response.json();
+      
+      try {
+        let text = data.text.trim();
+        // Remove markdown code blocks if any
+        if (text.startsWith('```json')) text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        if (text.startsWith('```')) text = text.replace(/```/g, '').trim();
+        
+        const generatedResults = JSON.parse(text);
+        if (Array.isArray(generatedResults)) {
+          setElasticResults(generatedResults);
+        } else {
+          throw new Error("Not an array");
+        }
+      } catch (e) {
+        // Fallback if JSON parse fails
+        setElasticResults([
+          { title: "Dynamic Exercise", excerpt: data.text.substring(0, 150) + "...", score: 0.99 }
+        ]);
+      }
     } catch (e) {
       console.log(e);
+      setElasticResults([
+         { title: "API Connection Failed", excerpt: "Could not formulate sentences.", score: 0.00 }
+      ]);
     } finally {
       setIsSearching(false);
     }
@@ -258,6 +285,7 @@ export default function CognitiveGym({
                    setRemediationContent("");
                    setElasticResults(null);
                    setElasticQuery("");
+                   setCustomText("");
                  }}
                  className="px-5 py-3 rounded-2xl border border-white/10 text-white/60 hover:text-white hover:bg-white/5 text-xs font-mono font-bold uppercase transition-all whitespace-nowrap"
                >
@@ -356,8 +384,17 @@ export default function CognitiveGym({
                  <p className="text-xs text-emerald-500/80 uppercase tracking-[0.2em] font-mono font-bold">Contextual Analysis Results:</p>
                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                    {elasticResults.map((res, i) => (
-                     <div key={i} className="p-5 bg-black/40 border border-emerald-500/20 rounded-2xl flex flex-col space-y-3 hover:border-emerald-500/40 transition-colors">
-                       <div className="flex items-center justify-between">
+                     <div 
+                       key={i} 
+                       onClick={() => {
+                         setCustomText(res.excerpt);
+                         setArenaTranscript("");
+                         setVoiceArenaSpoken([]);
+                         setRemediationContent("");
+                       }}
+                       className="p-5 bg-black/40 border border-emerald-500/20 rounded-2xl flex flex-col space-y-3 hover:border-emerald-400 hover:bg-emerald-900/10 transition-colors cursor-pointer"
+                     >
+                       <div className="flex items-center justify-between pointer-events-none">
                          <span className="text-emerald-300 font-bold text-sm tracking-wide">{res.title}</span>
                          <span className="text-[10px] font-mono bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded flex items-center gap-1">
                            Score: {res.score.toFixed(2)}
@@ -388,6 +425,7 @@ export default function CognitiveGym({
                       setVoiceArenaSpoken([]);
                       setArenaTranscript("");
                       setRemediationContent("");
+                      setCustomText("");
                     }}
                     className={`p-5 rounded-2xl border text-left flex flex-col justify-between transition-all duration-300 relative overflow-hidden backdrop-blur-md ${
                       selectedCardId === card.id
