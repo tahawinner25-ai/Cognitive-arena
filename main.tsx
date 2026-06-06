@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { BrainCircuit, BookOpen, Mic, VolumeX, Activity, Send, Loader2, CheckCircle2, SearchCode, Database, Search, Save } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { BrainCircuit, BookOpen, Mic, VolumeX, Activity, Send, Loader2, CheckCircle2, SearchCode, Database, Search, Save, Sparkles, X } from 'lucide-react';
 import Markdown from 'react-markdown';
 import { queryElasticRAG } from '../services/ai';
 import arenaIcon from '../assets/images/mount_ai_arena_icon_1779634554191.png';
 import { db } from '../services/firebase';
 import { collection, addDoc, query, where, orderBy, getDocs, serverTimestamp, Timestamp } from 'firebase/firestore';
+import IQTestApp from './IQTestApp';
 
 export const gymCards = [
   {
@@ -54,6 +55,7 @@ interface CognitiveGymProps {
   setRemediationContent: React.Dispatch<React.SetStateAction<string>>;
   isRemediating: boolean;
   setIsRemediating: React.Dispatch<React.SetStateAction<boolean>>;
+  speechError?: string | null;
 }
 
 export default function CognitiveGym({
@@ -62,17 +64,55 @@ export default function CognitiveGym({
   isRecording, toggleRecording, audioData,
   selectedCardId, setSelectedCardId,
   remediationContent, setRemediationContent,
-  isRemediating, setIsRemediating
+  isRemediating, setIsRemediating,
+  speechError
 }: CognitiveGymProps) {
   
   const [elasticQuery, setElasticQuery] = useState("");
+  const [instantFeedback, setInstantFeedback] = useState<{ show: boolean; spoken: number; total: number; accuracy: number } | null>(null);
+  const prevRecordingRef = useRef(isRecording);
   const [elasticResults, setElasticResults] = useState<{title: string, excerpt: string, score: number}[] | null>(null);
   const [isSearching, setIsSearching] = useState(false);
-  const [arenaView, setArenaView] = useState<'main' | 'history'>('main');
+  const [isRAGOpen, setIsRAGOpen] = useState(false); // Elasticsearch RAG dedicated floating window
+  const [simulationInput, setSimulationInput] = useState(""); // Live feedback simulation input
+  const [activeTab, setActiveTab] = useState<'cards' | 'formulation'>('cards'); // Sub-tab switcher to toggle standard exercises vs custom formulate
+  
+  const [arenaView, setArenaView] = useState<'main' | 'history' | 'iq-test'>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const view = params.get('view');
+    if (view === 'iq-test' || window.location.hash === '#iq-test') {
+      return 'iq-test';
+    }
+    return 'main';
+  });
   const [isArenaAuthenticated, setIsArenaAuthenticated] = useState(false);
   const [sessions, setSessions] = useState<any[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [customText, setCustomText] = useState("");
+
+  const handleSimulationChange = (text: string) => {
+    setSimulationInput(text);
+    if (!text.trim()) return;
+    
+    // Split input speech simulation words and cleanly push them into voiceArenaSpoken
+    const words = text.toLowerCase()
+      .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+
+    setVoiceArenaSpoken(prev => {
+      const next = [...prev];
+      let updated = false;
+      for (const w of words) {
+        if (!next.includes(w)) {
+          next.push(w);
+          updated = true;
+        }
+      }
+      return updated ? next : prev;
+    });
+  };
 
   useEffect(() => {
     if (arenaView === 'history' && user && isArenaAuthenticated) {
@@ -108,10 +148,60 @@ export default function CognitiveGym({
     setIsArenaAuthenticated(true);
   };
 
+  const currentCard = gymCards[selectedCardId] || gymCards[0];
+  const activeText = customText || currentCard.text;
+  const rawWords = activeText.split(/\s+/);
+  
+  // Words missed of length > 2
+  const missedList = rawWords
+    .map(w => w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, ""))
+    .filter(Boolean)
+    .filter(w => !voiceArenaSpoken.includes(w.toLowerCase()))
+    .filter(w => w.length > 2);
+
+  const spokenCount = rawWords.filter(w => {
+    const cleaned = w.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "");
+    return voiceArenaSpoken.includes(cleaned);
+  }).length;
+
+  const progressPercentage = Math.round((spokenCount / rawWords.length) * 100) || 0;
+
+  // Instant phonetic count and comparative sound synthesis on end of recording
+  useEffect(() => {
+    if (prevRecordingRef.current && !isRecording) {
+      const currentSpoken = spokenCount;
+      const currentTotal = rawWords.length;
+      const currentAccuracy = progressPercentage;
+
+      const msg = `Exercises complete! You correctly spoke ${currentSpoken} out of ${currentTotal} words. Accuracy score is ${currentAccuracy} percent.`;
+      
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(msg);
+        utterance.lang = 'en-US';
+        const voices = window.speechSynthesis.getVoices();
+        const engVoice = voices.find(v => v.lang.startsWith('en-US') || v.lang.startsWith('en-'));
+        if (engVoice) utterance.voice = engVoice;
+        window.speechSynthesis.speak(utterance);
+      }
+
+      setInstantFeedback({
+        show: true,
+        spoken: currentSpoken,
+        total: currentTotal,
+        accuracy: currentAccuracy
+      });
+    }
+    prevRecordingRef.current = isRecording;
+  }, [isRecording, spokenCount, rawWords.length, progressPercentage]);
+
   const saveCurrentSession = async () => {
     if (!user) return;
     try {
-      const card = gymCards[selectedCardId] || gymCards[0];
+      const card = activeTab === 'formulation' 
+        ? { title: "Custom Formulation Practice", text: activeText }
+        : (gymCards[selectedCardId] || gymCards[0]);
+         
       await addDoc(collection(db, "arena_sessions"), {
         userId: user.uid,
         title: card.title,
@@ -148,24 +238,6 @@ export default function CognitiveGym({
       </div>
     );
   }
-
-  const currentCard = gymCards[selectedCardId] || gymCards[0];
-  const activeText = customText || currentCard.text;
-  const rawWords = activeText.split(/\s+/);
-  
-  // Words missed of length > 2
-  const missedList = rawWords
-    .map(w => w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, ""))
-    .filter(Boolean)
-    .filter(w => !voiceArenaSpoken.includes(w.toLowerCase()))
-    .filter(w => w.length > 2);
-
-  const spokenCount = rawWords.filter(w => {
-    const cleaned = w.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "");
-    return voiceArenaSpoken.includes(cleaned);
-  }).length;
-
-  const progressPercentage = Math.round((spokenCount / rawWords.length) * 100) || 0;
 
   const triggerRemediation = async () => {
     if (isRemediating) return;
@@ -272,10 +344,26 @@ export default function CognitiveGym({
           
           <div className="flex flex-col gap-4">
              <button 
-               onClick={() => setArenaView(prev => prev === 'main' ? 'history' : 'main')}
+               onClick={() => setIsRAGOpen(true)}
+               className="px-5 py-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20 text-xs font-mono font-bold uppercase transition-all shadow-[0_0_15px_rgba(16,185,129,0.1)] whitespace-nowrap flex items-center justify-center gap-2 animate-pulse"
+             >
+               <Database className="w-4.5 h-4.5 text-emerald-400" /> 🔍 ASK ELASTIC RAG DESK
+             </button>
+             <button 
+               onClick={() => setArenaView(prev => prev === 'iq-test' ? 'main' : 'iq-test')}
+               className={`px-5 py-3 rounded-2xl font-mono text-xs font-bold uppercase transition-all whitespace-nowrap flex items-center justify-center gap-2 ${
+                 arenaView === 'iq-test'
+                 ? 'bg-rose-500/20 border border-rose-500/50 text-rose-300 shadow-[0_0_15px_rgba(244,63,94,0.3)] animate-none'
+                 : 'bg-gradient-to-r from-indigo-500/20 via-purple-500/20 to-pink-500/20 border border-indigo-500/50 text-indigo-300 hover:text-white hover:border-indigo-400 hover:shadow-[0_0_15px_rgba(139,92,246,0.3)] animate-pulse'
+               }`}
+             >
+               {arenaView === 'iq-test' ? 'Quitter le Test Q.I.' : '🎯 Tester mon Q.I. Exact'}
+             </button>
+             <button 
+               onClick={() => setArenaView(prev => prev === 'history' ? 'main' : 'history')}
                className="px-5 py-3 rounded-2xl bg-[#8b5cf6]/10 border border-[#8b5cf6]/30 text-[#a855f7] hover:bg-[#8b5cf6]/20 text-xs font-mono font-bold uppercase transition-all shadow-sm whitespace-nowrap"
              >
-               {arenaView === 'main' ? 'View Session History' : 'Return to Arena'}
+               {arenaView === 'history' ? 'Retourner à l\'Arène' : 'Historique des Sessions'}
              </button>
              {arenaView === 'main' && (
                <button 
@@ -286,6 +374,7 @@ export default function CognitiveGym({
                    setElasticResults(null);
                    setElasticQuery("");
                    setCustomText("");
+                   setSimulationInput("");
                  }}
                  className="px-5 py-3 rounded-2xl border border-white/10 text-white/60 hover:text-white hover:bg-white/5 text-xs font-mono font-bold uppercase transition-all whitespace-nowrap"
                >
@@ -295,7 +384,11 @@ export default function CognitiveGym({
           </div>
        </div>
 
-       {arenaView === 'history' ? (
+       {arenaView === 'iq-test' ? (
+          <div className="max-w-7xl mx-auto relative z-10 animate-in fade-in duration-500 bg-transparent min-h-[500px] pb-12">
+            <IQTestApp onClose={() => setArenaView('main')} />
+          </div>
+        ) : arenaView === 'history' ? (
          <div className="max-w-7xl mx-auto relative z-10 animate-in fade-in duration-500 bg-[#121626]/80 backdrop-blur-xl border border-[#8b5cf6]/30 rounded-[2.5rem] p-10 min-h-[500px]">
            <h3 className="text-xl font-black text-white uppercase tracking-widest border-b border-white/10 pb-4 mb-6">Patient Neuro-Cognitive Sessions</h3>
            
@@ -337,9 +430,9 @@ export default function CognitiveGym({
          </div>
        ) : (
          <>
-           {/* Emphasized Elastic Search Engine at the top */}
-       <div className="max-w-7xl mx-auto mb-6 relative z-10 animate-in fade-in slide-in-from-bottom-4 duration-700">
-         <div className="bg-[#121626]/80 border-2 border-emerald-500/30 rounded-[2rem] p-8 space-y-6 relative overflow-hidden backdrop-blur-xl shadow-[0_0_40px_rgba(16,185,129,0.1)]">
+           {/* Dedicated Elasticsearch RAG Desktop Console */}
+           <div className="hidden">
+           <div className="hidden">
            <div className="absolute top-0 right-0 p-8 opacity-[0.05] pointer-events-none">
              <Database className="w-48 h-48 text-emerald-400" />
            </div>
@@ -415,8 +508,42 @@ export default function CognitiveGym({
           {/* Left Columns - Training & Audio Interaction */}
           <div className="xl:col-span-8 space-y-6 flex flex-col">
              
+             {/* Mode Selector Hub Tabs */}
+             <div className="mb-6 flex bg-[#121626]/50 border border-white/5 rounded-2xl p-1.5 w-fit gap-1.5 backdrop-blur-sm self-start">
+               <button
+                 onClick={() => {
+                   setActiveTab('cards');
+                   setCustomText("");
+                   setVoiceArenaSpoken([]);
+                   setSimulationInput("");
+                 }}
+                 className={`px-5 py-2.5 rounded-xl text-xs font-bold uppercase transition-all flex items-center gap-2 ${
+                   activeTab === 'cards'
+                   ? 'bg-[#8b5cf6]/20 border border-[#8b5cf6]/50 text-[#c084fc] shadow-sm'
+                   : 'text-slate-400 hover:text-white hover:bg-white/5'
+                 }`}
+               >
+                 <BookOpen className="w-3.5 h-3.5" /> Practice Recommended Exercises
+               </button>
+               <button
+                 onClick={() => {
+                   setActiveTab('formulation');
+                   setCustomText("The brave white falcon flies quickly over the dark forest to discover secret treasures.");
+                   setVoiceArenaSpoken([]);
+                   setSimulationInput("");
+                 }}
+                 className={`px-5 py-2.5 rounded-xl text-xs font-bold uppercase transition-all flex items-center gap-2 ${
+                   activeTab === 'formulation'
+                   ? 'bg-[#ff4e00]/25 border border-[#ff4e00]/50 text-[#ff8b4d] shadow-sm'
+                   : 'text-slate-400 hover:text-white hover:bg-white/5'
+                 }`}
+               >
+                 <Send className="w-3.5 h-3.5" /> Phrase Formulation Desk
+               </button>
+             </div>
+
              {/* Selected Phonics Cards Selection */}
-             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+             <div className={`grid grid-cols-1 md:grid-cols-4 gap-4 ${activeTab === 'cards' ? '' : 'hidden'}`}>
                 {gymCards.map((card) => (
                   <button
                     key={card.id}
@@ -445,6 +572,118 @@ export default function CognitiveGym({
                   </button>
                 ))}
              </div>
+
+             {activeTab === 'formulation' && (
+               /* Phrase Formulation Desk Panel */
+               <div className="bg-[#121626]/80 border-2 border-dashed border-[#ff4e00]/30 rounded-[2.5rem] p-8 space-y-6 relative overflow-hidden backdrop-blur-xl animate-in fade-in duration-300 text-left mb-6">
+                 <div className="absolute top-0 right-0 p-8 opacity-[0.02] pointer-events-none">
+                   <Send className="w-48 h-48 text-[#ff4e00]" />
+                 </div>
+                 
+                 <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-white/5 pb-4 mb-2 gap-4">
+                   <div>
+                     <h4 className="text-sm uppercase tracking-[0.2em] font-black text-[#ff4e00] flex items-center gap-2">
+                       <Send className="w-4.5 h-4.5 text-[#ff4e00]" /> Active formulation playground
+                     </h4>
+                     <p className="text-xs text-slate-400 mt-1 font-mono">Formulate your complex phrases to practice oral speech under exact matching</p>
+                   </div>
+                   <div className="flex items-center gap-2">
+                     <button
+                       onClick={async () => {
+                         try {
+                           const response = await fetch('/api/cognitive-remediation', {
+                             method: "POST",
+                             headers: { "Content-Type": "application/json" },
+                             body: JSON.stringify({
+                               missedWords: ["articulation", "phonetics", "sibilant"],
+                               originalText: "Generate as many speech training sentences as possible.",
+                               language: selectedLang,
+                               customRequest: true
+                             })
+                           });
+                           if (response.ok) {
+                             const rData = await response.json();
+                             // Extract a neat sentence from the response snippet
+                             const lines = rData.remediation.replace(/[*#]/g, '').split('\n').filter((l: string) => l.trim().length > 15);
+                             if (lines.length > 0) {
+                               setCustomText(lines[0].trim());
+                             } else {
+                               setCustomText("The majestic falcon flies gracefully into the golden sunset.");
+                             }
+                             setVoiceArenaSpoken([]);
+                             setSimulationInput("");
+                           } else {
+                             setCustomText("The clinical therapist prepares phonetic exercises containing challenging double consonants.");
+                             setVoiceArenaSpoken([]);
+                             setSimulationInput("");
+                           }
+                         } catch (err) {
+                           setCustomText("Plural phonemes present complex obstacles for patients suffering from auditory discrimination.");
+                           setVoiceArenaSpoken([]);
+                           setSimulationInput("");
+                         }
+                       }}
+                       className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white font-mono text-[10px] font-bold uppercase transition-all flex items-center gap-1.5 animate-pulse"
+                     >
+                       <Sparkles className="w-3.5 h-3.5 text-[#ff4e00]" /> Suggest with AI
+                     </button>
+                     <button
+                       onClick={() => {
+                         setCustomText("");
+                         setVoiceArenaSpoken([]);
+                         setSimulationInput("");
+                       }}
+                       className="px-4 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-300 font-mono text-[10px] font-bold uppercase transition-all"
+                     >
+                       Reset Phrase
+                     </button>
+                   </div>
+                 </div>
+
+                 <div className="space-y-4">
+                   <textarea
+                     rows={3}
+                     placeholder="Type or formulate your own custom phrase here to practice..."
+                     value={customText}
+                     onChange={(e) => {
+                       setCustomText(e.target.value);
+                       setVoiceArenaSpoken([]);
+                       setSimulationInput("");
+                     }}
+                     className="w-full bg-black/60 border border-white/10 rounded-2xl p-5 text-white placeholder-slate-500 text-lg focus:border-[#ff4e00]/50 outline-none transition-all resize-y select-text font-medium leading-relaxed font-sans"
+                   />
+                   
+                   {/* Simulation sub-panel */}
+                   <div className="p-4 rounded-2xl bg-black/40 border border-white/5 space-y-3">
+                     <div className="flex items-center justify-between font-sans">
+                       <span className="text-[10px] font-mono font-bold text-[#ff4e00]/80 uppercase tracking-widest flex items-center gap-1.5">
+                         <Activity className="w-3.5 h-3.5 text-[#ff4e00]" /> Voice & Typing Evaluator Simulator
+                       </span>
+                       <span className="text-[9px] font-mono text-slate-500">Test word matching calculation instantly</span>
+                     </div>
+                     
+                     <div className="flex flex-col sm:flex-row gap-3">
+                       <input
+                         type="text"
+                         placeholder="Simulate pronunciation (type words you speak e.g. 'the brave white falcon')"
+                         value={simulationInput}
+                         onChange={(e) => handleSimulationChange(e.target.value)}
+                         className="flex-1 bg-black/40 border border-white/10 rounded-xl py-2 px-4 text-xs font-mono text-slate-300 placeholder-slate-600 focus:border-[#ef4e00]/30 outline-none"
+                       />
+                       <button
+                         onClick={() => {
+                           // Auto complete simulated correct pronunciation for demonstration
+                           handleSimulationChange(activeText.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, ""));
+                         }}
+                         className="px-4 py-2 bg-[#ff4e00]/10 hover:bg-[#ff4e00]/20 text-[#ff4e00] font-mono text-[10px] font-bold rounded-xl border border-[#ff4e00]/20 transition-all uppercase whitespace-nowrap"
+                       >
+                         ⚡ Simulate 100% Pronunciation
+                       </button>
+                     </div>
+                   </div>
+                 </div>
+               </div>
+             )}
 
              {/* Speech Reading Area Card */}
              <div className="bg-[#121626]/80 border border-white/5 rounded-[2.5rem] p-8 space-y-6 relative overflow-hidden backdrop-blur-xl flex-1 flex flex-col justify-between">
@@ -475,10 +714,21 @@ export default function CognitiveGym({
                       );
                     })}
                   </div>
-                </div>
-
-                {/* Microphone Controller Area */}
+                     {/* Microphone Controller Area */}
                 <div className="space-y-4 pt-6 mt-6 border-t border-white/5">
+                  {speechError && (
+                    <div className="p-4 bg-amber-500/10 border border-amber-500/30 text-amber-300 rounded-2xl text-xs flex flex-col gap-2 animate-in slide-in-from-top-1">
+                      <div className="flex items-center gap-2 font-black uppercase tracking-wider text-[10px]">
+                        <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+                        Microphone Access / Browser Policy Warning
+                      </div>
+                      <p>{speechError}</p>
+                      <p className="text-[10px] text-slate-400 leading-relaxed">
+                        Note: Les navigateurs bloquent souvent l'accès microphone à l'intérieur des iframes imbriquées. Ouvre l'application dans un **nouvel onglet** (bouton en haut à droite) ou utilise le panel de simulation ci-dessous pour tester sans soucis !
+                      </p>
+                    </div>
+                  )}
+
                   <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
                     <button
                       onClick={toggleRecording}
@@ -509,13 +759,41 @@ export default function CognitiveGym({
                     )}
                   </div>
 
+                  {/* Demo Control Center & Bypass Panel */}
+                  <div className="p-4 bg-slate-900/60 border border-white/10 rounded-2xl space-y-3 shadow-lg">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-mono font-black text-[#ff4e00] uppercase tracking-wider flex items-center gap-1.5">
+                        <Activity className="w-3.5 h-3.5 text-[#ff4e00]" /> Demo Failsafe Simulator Pipeline
+                      </span>
+                      <span className="text-[9px] font-mono text-slate-500">Garantit 100% de succès sur scène (sans micro)</span>
+                    </div>
+                    
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="text"
+                        placeholder="Tape les mots que tu prononces (ex: 'the brave white falcon')"
+                        value={simulationInput}
+                        onChange={(e) => handleSimulationChange(e.target.value)}
+                        className="flex-1 bg-black/60 border border-white/10 rounded-xl py-2 px-3 text-xs font-mono text-slate-200 placeholder-slate-600 focus:border-[#ff4e00]/40 outline-none"
+                      />
+                      <button
+                        onClick={() => {
+                          handleSimulationChange(activeText.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, ""));
+                        }}
+                        className="px-4 py-2 bg-[#ff4e00]/20 hover:bg-[#ff4e00]/30 text-[#ff4e00] font-mono text-[10px] font-bold rounded-xl border border-[#ff4e00]/30 transition-all uppercase whitespace-nowrap"
+                      >
+                        ⚡ Simulate 100% Correct
+                      </button>
+                    </div>
+                  </div>
+
                   {arenaTranscript && (
                     <div className="bg-black/40 rounded-xl p-4 border border-white/5 animate-in slide-in-from-top-2">
                       <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1.5">Direct Transcription Stream:</p>
                       <p className="text-xs text-slate-400 italic">"{arenaTranscript}"</p>
                     </div>
                   )}
-                </div>
+                </div>              </div>
              </div>
           </div>
 
@@ -627,7 +905,154 @@ export default function CognitiveGym({
           </div>
 
        </div>
-         </>
+
+        {/* Beautiful Live HUD feedback panel for instant word accuracy */}
+        {instantFeedback && (
+          <div className="fixed bottom-12 right-6 z-50 animate-in fade-in slide-in-from-bottom-4 duration-300 max-w-sm w-full bg-[#121626]/95 border border-[#8b5cf6]/40 rounded-3xl p-6 shadow-[0_10px_40px_rgba(139,92,246,0.25)] backdrop-blur-xl ring-1 ring-[#8b5cf6]/20">
+            <div className="flex items-start gap-4">
+              <div className="p-3 rounded-2xl bg-[#8b5cf6]/10 border border-[#8b5cf6]/30 text-[#c084fc]">
+                <Activity className="w-6 h-6 animate-pulse" />
+              </div>
+              <div className="flex-1 space-y-1 text-left font-sans">
+                <h4 className="text-xs font-black text-white uppercase tracking-wider">Pronunciation Score!</h4>
+                <p className="text-[11px] text-slate-400 font-mono">
+                  Correct: <span className="font-bold text-[#c084fc]">{instantFeedback.spoken}</span> / {instantFeedback.total} words
+                </p>
+                <div className="w-full bg-white/5 h-1.5 rounded-full overflow-hidden mt-1 border border-white/5">
+                  <div 
+                    className="bg-gradient-to-r from-[#8b5cf6] to-[#ff4e00] h-full rounded-full transition-all duration-1000" 
+                    style={{ width: `${instantFeedback.accuracy}%` }}
+                  />
+                </div>
+                <div className="flex justify-between items-center mt-3">
+                  <span className="text-[9px] font-bold uppercase text-slate-500 tracking-widest">Cognitive analysis</span>
+                  <span className="text-xs font-black font-mono text-[#c084fc] bg-[#8b5cf6]/10 px-2.5 py-0.5 rounded-full border border-[#8b5cf6]/20">{instantFeedback.accuracy}% Match</span>
+                </div>
+              </div>
+              <button 
+                onClick={() => setInstantFeedback(null)}
+                className="text-slate-500 hover:text-white transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
+       {/* Elasticsearch RAG Dedicated Floating Window Modal */}
+       {isRAGOpen && (
+         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-300">
+           <div className="relative w-full max-w-4xl bg-[#0b0e17] border-2 border-emerald-500/40 rounded-[2.5rem] overflow-hidden shadow-[0_0_50px_rgba(16,185,129,0.3)] max-h-[85vh] flex flex-col font-sans">
+             
+             {/* Decorative indicator header border glowing */}
+             <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 via-teal-500 to-transparent" />
+             
+             {/* Header */}
+             <div className="p-8 border-b border-white/5 flex items-center justify-between bg-[#121626]/80 backdrop-blur-xl">
+               <div className="flex items-center gap-4">
+                 <div className="w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                   <Database className="w-6 h-6 animate-pulse" />
+                 </div>
+                 <div className="text-left">
+                   <h3 className="text-xl font-black text-white uppercase tracking-wider flex items-center gap-2">
+                     Elasticsearch RAG Intelligence Desk
+                   </h3>
+                   <span className="text-[10px] font-mono text-emerald-500 uppercase tracking-widest block mt-0.5">
+                     Vectorial similarity search across clinical & pedagogical corpora
+                   </span>
+                 </div>
+               </div>
+               <button 
+                 onClick={() => setIsRAGOpen(false)}
+                 className="p-3 bg-white/5 border border-white/5 hover:border-white/20 text-slate-400 hover:text-white rounded-full transition-colors flex items-center justify-center"
+               >
+                 <X className="w-5 h-5" />
+               </button>
+             </div>
+
+             {/* Search Arena Content */}
+             <div className="p-8 space-y-6 overflow-y-auto flex-1 select-text">
+               <p className="text-sm text-slate-400 leading-relaxed max-w-2xl text-left">
+                 Ask a conceptual question or query the clinical corpus for dyslexia, speech therapy rules, or custom phonetic materials. The RAG will fetch relevant vector matches.
+               </p>
+
+               <div className="flex flex-col md:flex-row gap-4">
+                 <div className="relative flex-1">
+                   <SearchCode className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-emerald-500/50" />
+                   <input
+                     type="text"
+                     placeholder="Type what you want to query... (e.g. 'Grapheme confusion rules', 'Sibilant exercise recommendations')"
+                     value={elasticQuery}
+                     onChange={(e) => setElasticQuery(e.target.value)}
+                     className="w-full bg-black/60 border border-emerald-500/30 rounded-2xl py-4 pl-12 pr-4 text-emerald-100 text-sm focus:border-emerald-400 shadow-inner outline-none transition-all focus:bg-black/80 font-mono"
+                     onKeyDown={(e) => e.key === 'Enter' && handleElasticSearch()}
+                     autoFocus
+                   />
+                 </div>
+                 <button 
+                   onClick={handleElasticSearch}
+                   disabled={isSearching || !elasticQuery.trim()}
+                   className="px-8 py-4 bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-white font-bold rounded-2xl shadow-[0_0_20px_rgba(16,185,129,0.3)] disabled:opacity-50 transition-all flex items-center justify-center gap-2 font-black text-xs uppercase tracking-widest"
+                 >
+                   {isSearching ? <Loader2 className="w-5 h-5 animate-spin" /> : <>Run Query <Send className="w-4 h-4 ml-1"/></>}
+                 </button>
+               </div>
+
+               {elasticResults && (
+                 <div className="mt-8 space-y-4 animate-in fade-in duration-500 text-left">
+                   <div className="flex items-center justify-between border-b border-[#10b981]/10 pb-2">
+                     <p className="text-xs text-emerald-400 uppercase tracking-[0.2em] font-mono font-bold">
+                       Retrieved Matches (Semantic Rank):
+                     </p>
+                     <span className="text-[10px] text-slate-500 font-mono">Found {elasticResults.length} vectors</span>
+                   </div>
+                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                     {elasticResults.map((res, i) => (
+                       <div 
+                         key={i} 
+                         onClick={() => {
+                           // Load corpus as active practice sentence
+                           setActiveTab('formulation');
+                           setCustomText(res.excerpt);
+                           setArenaTranscript("");
+                           setVoiceArenaSpoken([]);
+                           setRemediationContent("");
+                           setSimulationInput("");
+                           setIsRAGOpen(false); // Close RAG window
+                         }}
+                         className="p-5 bg-black/40 border border-emerald-500/20 rounded-2xl flex flex-col space-y-3 hover:border-emerald-400 hover:bg-[#10b981]/5 transition-all cursor-pointer group"
+                       >
+                         <div className="flex items-center justify-between pointer-events-none">
+                           <span className="text-emerald-300 font-bold text-sm tracking-wide group-hover:text-emerald-400 font-sans">{res.title}</span>
+                           <span className="text-[10px] font-mono bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded flex items-center gap-1">
+                             Score: {res.score.toFixed(2)}
+                           </span>
+                         </div>
+                         <p className="text-xs text-slate-300 italic leading-relaxed font-sans">"{res.excerpt}"</p>
+                         <span className="text-[9px] font-mono text-emerald-500/60 uppercase tracking-widest mt-2 block pointer-events-none group-hover:text-emerald-400 transition-colors">
+                           ⚡ Click to inject as practice sentence
+                         </span>
+                       </div>
+                     ))}
+                   </div>
+                 </div>
+               )}
+             </div>
+
+             {/* Footer */}
+             <div className="p-6 bg-black/40 border-t border-white/5 text-center flex justify-between items-center px-8">
+               <span className="text-[10px] font-mono text-slate-500 uppercase">Elasticsearch RAG Module V1.3.0 • Secured API</span>
+               <button 
+                 onClick={() => setIsRAGOpen(false)}
+                 className="px-5 py-2 hover:bg-white/5 border border-white/10 rounded-xl text-xs font-mono text-white transition-colors"
+               >
+                 Close Desk
+               </button>
+             </div>
+           </div>
+         </div>
+       )}
+          </>
        )}
     </div>
   );
